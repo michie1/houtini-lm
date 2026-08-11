@@ -37,6 +37,7 @@ import {
 import { acquireInferenceLock } from './inference-lock.js';
 import { SERVER_VERSION } from './version.js';
 import { parseContextOverflow, correctedMaxTokens } from './context-overflow.js';
+import { parseSseDataLine } from './sse.js';
 import { readFile, stat, realpath } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { isAbsolute, basename, resolve, sep } from 'node:path';
@@ -343,9 +344,9 @@ function sessionSummary(): string {
   // Lifetime numbers only show once there's something in the DB — avoids a
   // confusing "lifetime: 0" on a truly fresh install.
   if (lifetime.totalCalls > 0) {
-    return `💰 Claude quota saved — ${sessionPart} · lifetime: ${lifetime.totalTokens.toLocaleString()} tokens / ${lifetime.totalCalls} ${callWord(lifetime.totalCalls)}`;
+    return `💰 Main-model quota saved — ${sessionPart} · lifetime: ${lifetime.totalTokens.toLocaleString()} tokens / ${lifetime.totalCalls} ${callWord(lifetime.totalCalls)}`;
   }
-  return `💰 Claude quota saved ${sessionPart}`;
+  return `💰 Main-model quota saved ${sessionPart}`;
 }
 
 /**
@@ -1265,11 +1266,11 @@ async function chatCompletionStreamingInner(
 
       for (const line of lines) {
         const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
-        if (!trimmed.startsWith('data: ')) continue;
+        const payload = parseSseDataLine(trimmed);
+        if (payload === null || payload === '[DONE]') continue;
 
         try {
-          const json = JSON.parse(trimmed.slice(6));
+          const json = JSON.parse(payload);
 
           // Mid-stream error from the backend — capture the cause and stop.
           // The connection usually closes normally right after, so without
@@ -1335,9 +1336,10 @@ async function chatCompletionStreamingInner(
     // message and may not have a trailing newline, leaving it stranded in buffer.
     if (buffer.trim()) {
       const trimmed = buffer.trim();
-      if (trimmed.startsWith('data: ') && trimmed !== 'data: [DONE]') {
+      const payload = parseSseDataLine(trimmed);
+      if (payload !== null && payload !== '[DONE]') {
         try {
-          const json = JSON.parse(trimmed.slice(6));
+          const json = JSON.parse(payload);
           const errMsg = extractStreamError(json);
           if (errMsg) {
             streamError = errMsg;
@@ -1889,7 +1891,7 @@ function formatQualityLine(quality: QualitySignal): string {
  *   ---
  *   Model: ... | prompt→completion tokens | perf | extra | quality
  *   📊 [first-call benchmark line, only on the first measured call per model]
- *   💰 Claude quota saved this session: ...
+ *   💰 Main-model quota saved this session: ...
  */
 function formatFooter(resp: StreamingResult, extra?: string): string {
   // Record usage for session tracking before formatting
@@ -2635,7 +2637,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const summary = sessionSummary();
         const sessionStats = session.calls > 0 || lifetime.totalCalls > 0
           ? `\n${summary}`
-          : `\n💰 Claude quota saved this session: 0 tokens — no calls yet. Measured speed for each model will appear here after the first real call.`;
+          : `\n💰 Main-model quota saved this session: 0 tokens — no calls yet. Measured speed for each model will appear here after the first real call.`;
 
         // Measured speed line for the active model. Discover intentionally does
         // not run a synthetic warmup — speed is captured from real tasks, so the
